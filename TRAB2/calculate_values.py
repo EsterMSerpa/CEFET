@@ -1,92 +1,128 @@
-import numpy as np
-import random
 import pandas as pd
 
-# Funções de conversores
-def buck(Vin, Vout, Iout, f, L, C, R):
-    return Vin * (1 - (Vout / Vin)) - Iout * R
 
-def boost(Vin, Vout, Iout, f, L, C, R):
-    return Vin * (1 + (Vout / Vin)) - Iout * R
+resistores_comerciais = [1, 1.2, 1.5, 1.8, 2.2, 2.7, 3.3, 3.9, 4.7, 5.6, 6.8, 8.2, 10]
+resistores_comerciais = [r * 10**e for e in range(-1, 3) for r in resistores_comerciais]  # 0.1 a 1000 ohms
 
-def buck_boost(Vin, Vout, Iout, f, L, C, R):
-    return Vin * (Vout / (Vin - Vout)) - Iout * R
+def componentes_conversor(tipo, Vout, Iout, freq, Vin=None, tol=1e-3, max_iter=100):
+    """
+    tipo: 'buck', 'boost', 'buck-boost', 'cuk'
+    Vout: tensão de saída desejada (V)
+    Iout: corrente de saída desejada (A)
+    freq: frequência de chaveamento (Hz)
+    Vin: tensão de entrada (V) [opcional, será estimada se não fornecida]
+    tol: tolerância para o ajuste do Vout
+    max_iter: número máximo de iterações para o ajuste do L
+    """
+    T = 1 / freq
+    R = Vout / Iout
 
-def cuk(Vin, Vout, Iout, f, L, C, R):
-    return Vin * (Vout / (Vin + Vout)) - Iout * R
-
-# Função auxiliar para gerar resistores comerciais (E12)
-def get_commercial_resistor():
-    e12_series = [1.0, 1.2, 1.5, 1.8, 2.2, 2.7, 3.3, 3.9, 4.7, 5.6, 6.8, 8.2]
-    base = random.choice(e12_series)
-    multiplier = 10 ** random.randint(0, 2)  # Gera valores entre 1Ω e 820Ω
-    return base * multiplier
-
-# Algoritmo genético com restrições
-def genetic_algorithm(converter, Vout, Iout, generations=1000, population_size=100):
-    population = [{'Vin': random.uniform(0, 100),
-                   'f': random.uniform(60, 100),  # Frequência entre 60 e 100 Hz
-                   'L': random.uniform(0.1, 10),  # Evita indutância zero
-                   'C': random.uniform(0.1, 10),
-                   'R': get_commercial_resistor()} for _ in range(population_size)]
-    
-    for generation in range(generations):
-        fitness = [abs(converter(ind['Vin'], Vout, Iout, ind['f'], ind['L'], ind['C'], ind['R'])) for ind in population]
-        selected = [population[i] for i in np.argsort(fitness)[:population_size // 2]]
-        
-        new_population = []
-        for _ in range(population_size // 2):
-            p1, p2 = random.sample(selected, 2)
-            child = {}
-            for k in p1:
-                if k == 'R':
-                    child[k] = get_commercial_resistor()
-                else:
-                    child[k] = (p1[k] + p2[k]) / 2
-            if random.random() < 0.1:
-                param = random.choice(list(child.keys()))
-                if param != 'R':
-                    child[param] *= random.uniform(0.9, 1.1)
-            new_population.append(child)
-        
-        population = selected + new_population
-    
-    best = population[np.argmin([abs(converter(ind['Vin'], Vout, Iout, ind['f'], ind['L'], ind['C'], ind['R'])) for ind in population])]
-    return best
-
-# Parâmetros desejados
-Vout = 12
-Iout = 2
-
-def main():
-    Va = 5
-    Ia = 1
-    values_df = {}
-
-    types = ['buck', 'boost', 'buck-boost', 'cuk']
-    values_df['Type'] = types
-
-    for ret_type in types:
-        if ret_type == 'buck':
-            comp_values = genetic_algorithm(buck, Vout, Iout)
-        elif ret_type == 'boost':
-            comp_values = genetic_algorithm(boost, Vout, Iout)
-        elif ret_type == 'buck-boost':
-            comp_values = genetic_algorithm(buck_boost, Vout, Iout)
-        elif ret_type == 'cuk':
-            comp_values = genetic_algorithm(cuk, Vout, Iout)
-
-        if 'Vin' not in values_df:
-            values_df.update(comp_values)
+    def calcula_Vout_estimado(tipo, Vin, L, D):
+        # Fórmulas clássicas para estimar Vout dado Vin, L, e D
+        if tipo == 'buck':
+            return D * Vin
+        elif tipo == 'boost':
+            return Vin / (1 - D)
+        elif tipo == 'buck-boost':
+            return -D / (1 - D) * Vin
+        elif tipo == 'cuk':
+            return -D / (1 - D) * Vin
         else:
-            if not isinstance(values_df['Vin'], list):
-                for key in ['Vin', 'f', 'L', 'C', 'R']:
-                    values_df[key] = [values_df[key]]
-            for key in ['Vin', 'f', 'L', 'C', 'R']:
-                values_df[key].append(comp_values[key])
+            raise ValueError("Tipo inválido.")
 
-    values_df = pd.DataFrame(values_df)
-    print(values_df.to_string(index=False))
+    if tipo.lower() == 'buck':
+        if Vin is None:
+            Vin = Vout / 0.5  # Duty médio de 0.5
+        D = Vout / Vin
+        IL = Iout
+        delta_IL = 0.2 * IL
+        L = (Vin - Vout) * D * T / delta_IL
+        delta_Vc = 0.01 * Vout
+        C = Iout * D * T / (8 * delta_Vc)
 
-if __name__ == "__main__":
-    main()
+        # Ajuste iterativo do L para corrigir Vout
+        for _ in range(max_iter):
+            Vout_est = calcula_Vout_estimado('buck', Vin, L, D)
+            erro = Vout - Vout_est
+            if abs(erro) < tol:
+                break
+            # Ajusta L proporcionalmente (simples)
+            # Se Vout_est < Vout, diminuir L para aumentar corrente e melhorar resposta
+            L *= (Vout / (Vout_est + 1e-9))
+
+    elif tipo.lower() == 'boost':
+        if Vin is None:
+            Vin = Vout * 0.5  # Duty médio de 0.5
+        D = 1 - Vin / Vout
+        IL = Iout / (1 - D)
+        delta_IL = 0.2 * IL
+        L = Vin * D * T / delta_IL
+        delta_Vc = 0.01 * Vout
+        C = Iout * T * D / (8 * delta_Vc)
+
+        for _ in range(max_iter):
+            Vout_est = calcula_Vout_estimado('boost', Vin, L, D)
+            erro = Vout - Vout_est
+            if abs(erro) < tol:
+                break
+            L *= (Vout / (Vout_est + 1e-9))
+
+    elif tipo.lower() == 'buck-boost':
+        if Vin is None:
+            Vin = Vout / -0.5  # Duty médio de 0.5
+        D = Vout / (Vin + Vout)
+        IL = Iout / (1 - D)
+        delta_IL = 0.2 * IL
+        L = Vin * D * T / delta_IL
+        delta_Vc = 0.01 * Vout
+        C = Iout * T * D / (8 * delta_Vc)
+
+        for _ in range(max_iter):
+            Vout_est = calcula_Vout_estimado('buck-boost', Vin, L, D)
+            erro = Vout - Vout_est
+            if abs(erro) < tol:
+                break
+            L *= (Vout / (Vout_est + 1e-9))
+
+    elif tipo.lower() == 'cuk':
+        if Vin is None:
+            Vin = Vout / -0.5
+        D = Vout / (Vin + Vout)
+        IL = Iout  # Aproximação
+        delta_IL = 0.2 * IL
+        L1 = Vin * D * T / delta_IL
+        L2 = Vout * D * T / delta_IL
+        delta_Vc = 0.01 * Vout
+        C1 = Iout * T / (8 * delta_Vc)
+        C2 = C1
+        # Aqui não faço ajuste iterativo, poderia ser implementado similarmente
+        return {
+            "Vin_estimado": round(Vin, 2),
+            "R": round(R, 2),
+            "L1": round(L1, 6),
+            "L2": round(L2, 6),
+            "C1": round(C1, 9),
+            "C2": round(C2, 9)
+        }
+
+    else:
+        raise ValueError("Tipo de conversor inválido. Escolha entre 'buck', 'boost', 'buck-boost' ou 'cuk'.")
+
+    return {
+        "Vin_estimado": round(Vin, 2),
+        "R": round(R, 2),
+        "L": round(L, 6),
+        "C": round(C, 9),
+        "Vout_estimado": round(Vout_est, 4),
+        "erro_Vout": round(erro, 6)
+    }
+
+
+values = []
+tipos = ['buck', 'boost', 'buck-boost', 'cuk']
+for conversor in tipos:
+    values.append(componentes_conversor(conversor, 12, 2, 100, Vin=None))
+
+
+print(pd.DataFrame(values))
+x=0
